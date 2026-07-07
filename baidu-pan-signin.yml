@@ -1,0 +1,29 @@
+name: 百度网盘自动签到
+
+on:
+  schedule:
+    # 每天北京时间 10:30 执行 (UTC 02:30)
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  signin:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装依赖
+        run: pip install requests
+
+      - name: 执行签到
+        env:
+          BAIDU_COOKIE: ${{ secrets.BAIDU_COOKIE }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_USER_ID: ${{ secrets.TG_USER_ID }}
+        run: python du.py
