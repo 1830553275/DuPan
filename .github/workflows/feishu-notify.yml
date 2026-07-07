@@ -1,82 +1,85 @@
 name: 飞书签到通知
 
-# 监听「百度贴吧自动签到」workflow 运行结束
 on:
-  workflow_run:
-    workflows: ["百度贴吧自动签到"]
-    types:
-      - completed
+  schedule:
+    - cron: '10 2 * * *'
+  workflow_dispatch:
 
 jobs:
-  notify-feishu:
+  notify:
     runs-on: ubuntu-latest
     steps:
       - name: 发送飞书通知
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
           FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
-          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
-          WORKFLOW_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
-          WORKFLOW_URL: ${{ github.event.workflow_run.html_url }}
-          RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
-          REPO_NAME: ${{ github.event.repository.full_name }}
-          BRANCH: ${{ github.event.workflow_run.head_branch }}
-          EVENT: ${{ github.event.action }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
-          set -e
-
           if [ -z "$FEISHU_WEBHOOK" ]; then
-            echo "未配置 FEISHU_WEBHOOK Secret，跳过通知"
+            echo "未配置 FEISHU_WEBHOOK"
+            exit 1
+          fi
+
+          echo "=== 查询最近一次签到结果 ==="
+          API_DATA=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/actions/runs?per_page=10")
+
+          SIGNIN_INFO=$(echo "$API_DATA" | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)
+          for r in d.get('workflow_runs',[]):
+            if r['name']!='飞书签到通知':
+              print(r['name'])
+              print(r.get('conclusion') or 'running')
+              print(r['html_url'])
+              break
+          ")
+
+          SIGNIN_NAME=$(echo "$SIGNIN_INFO" | sed -n '1p')
+          SIGNIN_STATUS=$(echo "$SIGNIN_INFO" | sed -n '2p')
+          SIGNIN_URL=$(echo "$SIGNIN_INFO" | sed -n '3p')
+
+          echo "签到: $SIGNIN_NAME | 状态: $SIGNIN_STATUS"
+
+          if [ -z "$SIGNIN_STATUS" ]; then
+            echo "未找到签到记录，跳过"
             exit 0
           fi
 
-          # 状态判定
-          if [ "$WORKFLOW_CONCLUSION" = "success" ]; then
-            TITLE="贴吧签到成功"
+          if [ "$SIGNIN_STATUS" = "success" ]; then
+            TITLE="签到成功"
             COLOR="green"
             ICON="✅"
-            STATUS_TEXT="签到成功"
-          elif [ "$WORKFLOW_CONCLUSION" = "failure" ]; then
-            TITLE="贴吧签到失败"
+          elif [ "$SIGNIN_STATUS" = "failure" ]; then
+            TITLE="签到失败"
             COLOR="red"
             ICON="❌"
-            STATUS_TEXT="签到失败，请检查日志"
-          elif [ "$WORKFLOW_CONCLUSION" = "cancelled" ]; then
-            TITLE="贴吧签到已取消"
-            COLOR="grey"
-            ICON="⏹️"
-            STATUS_TEXT="运行被取消"
           else
-            TITLE="贴吧签到状态异常"
-            COLOR="yellow"
+            TITLE="签到异常"
+            COLOR="grey"
             ICON="⚠️"
-            STATUS_TEXT="状态: $WORKFLOW_CONCLUSION"
           fi
 
-          # 北京时间（UTC+8）
           BJ_TIME=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')
 
-          # 构造卡片消息
-          CONTENT="**$ICON $TITLE**\n\n"
-          CONTENT+="运行编号：#$RUN_NUMBER\n"
-          CONTENT+="运行状态：$STATUS_TEXT\n"
-          CONTENT+="触发分支：$BRANCH\n"
-          CONTENT+="仓库：$REPO_NAME\n"
-          CONTENT+="北京时间：$BJ_TIME\n\n"
-          CONTENT+="[查看运行详情]($WORKFLOW_URL)"
+          echo "=== 构造飞书卡片 ==="
 
-          CARD=$(cat <<EOF
+          cat > /tmp/card.json << JSONEOF
           {
             "msg_type": "interactive",
             "card": {
               "header": {
-                "title": { "tag": "plain_text", "content": "$TITLE" },
+                "title": { "tag": "plain_text", "content": "$ICON $TITLE" },
                 "template": "$COLOR"
               },
               "elements": [
                 {
                   "tag": "div",
-                  "text": { "tag": "lark_md", "content": "$CONTENT" }
+                  "text": {
+                    "tag": "lark_md",
+                    "content": "**$ICON $TITLE**\n仓库：$REPO\n时间：$BJ_TIME"
+                  }
                 },
                 {
                   "tag": "action",
@@ -84,7 +87,7 @@ jobs:
                     {
                       "tag": "button",
                       "text": { "tag": "plain_text", "content": "查看运行日志" },
-                      "url": "$WORKFLOW_URL",
+                      "url": "$SIGNIN_URL",
                       "type": "primary"
                     }
                   ]
@@ -92,33 +95,36 @@ jobs:
               ]
             }
           }
-          EOF
-          )
+          JSONEOF
 
-          # 签名校验（如果配置了 secret）
+          echo "卡片已构造完成"
+
           if [ -n "$FEISHU_SECRET" ]; then
+            echo "使用签名校验"
             TIMESTAMP=$(date +%s)
-            STRING_TO_SIGN="$TIMESTAMP\n$FEISHU_SECRET"
+            STRING_TO_SIGN="${TIMESTAMP}\n${FEISHU_SECRET}"
             SIGN=$(printf "$STRING_TO_SIGN" | openssl dgst -sha256 -hmac "$FEISHU_SECRET" -binary | base64)
-            # 带 timestamp 和 sign 的 Webhook URL
             WEBHOOK_URL="${FEISHU_WEBHOOK}&timestamp=${TIMESTAMP}&sign=${SIGN}"
           else
+            echo "无签名校验"
             WEBHOOK_URL="$FEISHU_WEBHOOK"
           fi
 
-          # 发送
-          RESPONSE=$(curl -s -X POST "$WEBHOOK_URL" \
+          echo "=== 发送飞书通知 ==="
+          RESP=$(curl -s -X POST "$WEBHOOK_URL" \
             -H "Content-Type: application/json" \
-            -d "$CARD")
+            -d @/tmp/card.json)
 
-          echo "飞书返回: $RESPONSE"
+          echo "飞书返回: $RESP"
 
-          if echo "$RESPONSE" | grep -q '"code":0'; then
-            echo "飞书通知发送成功"
-          elif echo "$RESPONSE" | grep -q '"code":19021'; then
-            echo "签名校验失败，请检查 FEISHU_SECRET 配置"
-            exit 1
+          if echo "$RESP" | grep -q '"code":0'; then
+            echo "✅ 发送成功"
+          elif echo "$RESP" | grep -q '19021'; then
+            echo "❌ 签名校验失败"
+          elif echo "$RESP" | grep -q '9499'; then
+            echo "❌ Webhook 失效"
+          elif echo "$RESP" | grep -q '19022'; then
+            echo "❌ IP 白名单拦截"
           else
-            echo "飞书通知发送异常，请检查 Webhook URL"
-            exit 1
+            echo "⚠️ 未知返回"
           fi
