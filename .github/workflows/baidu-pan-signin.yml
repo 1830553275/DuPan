@@ -3,7 +3,7 @@ name: 百度网盘自动签到
 on:
   schedule:
     # 每天北京时间 10:30 执行 (UTC 02:30)
-    - cron: '30 2 * * *'
+    - cron: '17 2 * * *'
   workflow_dispatch:
 
 jobs:
